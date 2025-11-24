@@ -6,7 +6,3 @@ to Run run the script data will be saved to CSV File, and outputed live in the t
 ```/bin/bash
 python3 ./forza_telemetry.py
 ```
-
-
-```
-```
