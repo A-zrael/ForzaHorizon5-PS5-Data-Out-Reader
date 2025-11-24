@@ -1,17 +1,17 @@
 import socket
 import struct
 import math
-import json
 import csv
 from datetime import datetime
 
 # UDP settings
 UDP_IP = "0.0.0.0"  # listen on all interfaces
-UDP_PORT = 5030     # PS5 Dash telemetry port
+UDP_PORT = 5030  # PS5 Dash telemetry port
 
 # CSV setup
 CSV_FILE = "forza_dash.csv"
 write_header = True
+
 
 # Function to parse a single Dash packet
 def parse_dash_packet(data):
@@ -21,7 +21,8 @@ def parse_dash_packet(data):
 
     # Unpack floats and integers according to your layout
     isRaceOn, timestampMS = struct.unpack_from("<iI", data, 0)
-    engineMaxRpm, engineIdleRpm, currentEngineRpm = struct.unpack_from("<fff", data, 8)
+    engineMaxRpm, engineIdleRpm, currentEngineRpm = struct.unpack_from(
+        "<fff", data, 8)
     accelX, accelY, accelZ = struct.unpack_from("<fff", data, 20)
     velX, velY, velZ = struct.unpack_from("<fff", data, 32)
     gear = struct.unpack_from("<B", data, 319)[0]
@@ -50,6 +51,7 @@ def parse_dash_packet(data):
         "vel_z": velZ,
     }
 
+
 # UDP socket setup
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 sock.bind((UDP_IP, UDP_PORT))
@@ -66,7 +68,7 @@ while True:
     packet = parse_dash_packet(data)
     if packet:
         # Print JSON
-        print(json.dumps(packet, indent=2))
+        print(prev_data[-1])
         # Write CSV
         if write_header:
             csv_writer = csv.DictWriter(csv_file, fieldnames=packet.keys())
