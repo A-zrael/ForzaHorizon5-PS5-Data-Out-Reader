@@ -91,18 +91,29 @@ def waitrace(CSV_FILE, UDP_IP, UDP_PORT):
     return prev_data
 
 
-Filename = input("Enter File Name: ") + ".csv"
+Menu = True
 threads = []
-RaceRecorder = threading.Thread(
-    target=waitrace, args=(Filename, "0.0.0.0", 5030))
-RaceRecorder.start()
-
-# Filename = input("Enter File Name: ") + ".csv"
-# RaceRecorder = threading.Thread(
-#    target=waitrace, args=(Filename, "0.0.0.0", 5031))
-# RaceRecorder.start()
-
-threads.append(RaceRecorder)
+races = []
+while Menu:
+    menu_select = input(
+        ">1 Add Race To Record\n>2 Start Record on Race Start\n")
+    match menu_select:
+        case "1":
+            Filename = input("Enter File Name: ") + ".csv"
+            IP = input("IP: ")
+            PORT = input("PORT: ")
+            races.append([Filename, IP, int(PORT)])
+            print(races)
+        case "2":
+            for i in races:
+                RaceRecorder = threading.Thread(
+                    target=waitrace, args=(i[0], i[1], i[2])
+                )
+                RaceRecorder.start()
+                threads.append(RaceRecorder)
+            Menu = False
+print("Threads:")
+print(threads)
 for i in threads:
     i.join()
 print("All Threads Complete")
