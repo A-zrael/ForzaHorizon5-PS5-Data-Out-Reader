@@ -112,8 +112,7 @@ while Menu:
                 RaceRecorder.start()
                 threads.append(RaceRecorder)
             Menu = False
-print("Threads:")
-print(threads)
+
 for i in threads:
     i.join()
 print("All Threads Complete")
