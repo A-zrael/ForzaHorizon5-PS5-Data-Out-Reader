@@ -1,0 +1,541 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<title>Average-Line Multi-Car + Confidence Band + Sectors</title>
+<style>
+  body{background:#0b0b0b;color:#eee;font-family:Arial,Helvetica,sans-serif;margin:0;padding:18px;text-align:center;}
+  header{margin-bottom:10px;}
+  .controls{margin:8px 0;display:flex;gap:8px;justify-content:center;flex-wrap:wrap;}
+  input[type=file]{color:#fff;}
+  #dashContainer{display:flex;flex-wrap:wrap;justify-content:center;gap:14px;margin-top:12px;}
+  .dash{background:#111;padding:12px;border-radius:12px;width:320px;box-shadow:0 6px 20px rgba(0,0,0,0.6);}
+  .dash h3{margin:0 0 6px 0;font-size:16px;}
+  canvas{background:#000;border-radius:8px;display:block;margin:6px auto;}
+  .gear{font-size:56px;font-weight:700;margin-top:6px;}
+  .rpm-bar{width:260px;height:18px;background:#222;border-radius:12px;margin:8px auto;overflow:hidden;}
+  .rpm-fill{height:100%;width:0%;background:linear-gradient(90deg,#7CFC00,#ffd700,#ff4500);}
+  button{padding:8px 14px;margin:4px;font-size:14px;border-radius:8px;border:0;background:#222;color:#fff;cursor:pointer;}
+  button.small{padding:6px 8px;font-size:13px;}
+  input[type=range]{width:68%;margin-top:10px;}
+  #legend{display:flex;justify-content:center;gap:12px;margin-top:8px;flex-wrap:wrap;}
+  .legendItem{display:flex;gap:8px;align-items:center;font-size:13px;}
+  .dot{width:14px;height:14px;border-radius:50%;display:inline-block;}
+  #trackWrap{margin-top:16px;}
+  #track{border-radius:12px;background:#000;box-shadow:inset 0 0 80px rgba(0,0,0,0.6);}
+  #info{margin-top:8px;font-size:13px;color:#ddd;}
+  table.timing{margin:8px auto;border-collapse:collapse;}
+  table.timing td, table.timing th{padding:4px 8px;border:1px solid #222;font-size:13px;}
+  #exportBtns{display:flex;gap:8px;justify-content:center;margin-top:8px;}
+</style>
+</head>
+<body>
+<header>
+  <h1>Average-Line Telemetry — Confidence Band + Sectors</h1>
+  <div class="controls">
+    <input type="file" id="csvInput" multiple accept=".csv"/>
+    <button id="loadBtn">Load CSVs</button>
+    <input type="file" id="masterJsonInput" accept=".json"/>
+    <button id="useMasterBtn" class="small">Load Master JSON</button>
+    <button id="exportMasterBtn" class="small">Export Master JSON</button>
+    <button onclick="play()">▶ Play</button>
+    <button onclick="pause()">⏸ Pause</button>
+  </div>
+
+  <div>
+    <input type="range" id="scrubber" min="0" max="0" value="0"/>
+  </div>
+  <div id="legend"></div>
+  <div id="info">Tip: Upload 2 (or more) POV CSVs. Master JSON can be exported and reused.</div>
+</header>
+
+<div id="dashContainer"></div>
+
+<div id="trackWrap">
+  <h2>Master Averaged Track</h2>
+  <canvas id="track" width="900" height="900"></canvas>
+  <div id="exportBtns"></div>
+</div>
+
+<script>
+/* CONFIG */
+const SAMPLES = 800;        // master samples along lap
+const SECTORS = 4;          // at least 4 sectors (you asked >=4)
+const CONF_STD_MULT = 1.5;  // exclude points farther than mean+mult*std
+const ABS_EXCLUDE_M = 12;   // absolute meter cutoff to exclude (crash)
+const colors = ["#00ffff","#ffa500","#ff66cc","#7CFC00","#ff8c00","#ff4444","#ffffff","#00bfff"];
+
+const MIN_DT = 0.016, MAX_DT = 0.25;
+
+/* STATE */
+let cars = [];          // { name, color, data, dataIndex, index, totalDist, speedScale }
+let masterTrack = [];   // [{x,y,distAlong},...]
+let sectors = [];       // array of sector boundaries (dist along master)
+let playing = false;
+let minX=Infinity,maxX=-Infinity,minY=Infinity,maxY=-Infinity;
+
+const csvInput = document.getElementById("csvInput");
+const loadBtn = document.getElementById("loadBtn");
+const masterJsonInput = document.getElementById("masterJsonInput");
+const useMasterBtn = document.getElementById("useMasterBtn");
+const exportMasterBtn = document.getElementById("exportMasterBtn");
+const scrubber = document.getElementById("scrubber");
+const dashContainer = document.getElementById("dashContainer");
+const legend = document.getElementById("legend");
+const trackCanvas = document.getElementById("track");
+const trackCtx = trackCanvas.getContext("2d");
+
+/* HELPERS */
+const safe = v => { const n=parseFloat(v); return Number.isFinite(n)?n:0; };
+function basename(n){ return n.replace(/^.*[\\/]/,'').replace(/\.[^.]+$/,''); }
+
+/* LOAD HANDLERS */
+loadBtn.onclick = () => {
+  if(!csvInput.files.length) return alert("Choose CSV files first");
+  startLoad([...csvInput.files].slice(0,8));
+};
+
+masterJsonInput.addEventListener('change', e=>{
+  const f = e.target.files[0];
+  if(!f) return;
+  const r = new FileReader();
+  r.onload = ev => {
+    try{
+      const obj = JSON.parse(ev.target.result);
+      if(Array.isArray(obj.master)) {
+        masterTrack = obj.master;
+        buildSectors();
+        drawMasterTrack();
+        createDashboards(); // no cars yet, but prefill UI
+        alert("Master track loaded from JSON.");
+      } else alert("Invalid master JSON.");
+    }catch(err){ alert("Invalid JSON file."); }
+  };
+  r.readAsText(f);
+});
+
+useMasterBtn.onclick = ()=> masterJsonInput.click();
+
+exportMasterBtn.onclick = ()=> {
+  if(!masterTrack.length) return alert("No master to export yet.");
+  const payload = { master: masterTrack, sectors };
+  const blob = new Blob([JSON.stringify(payload)], {type:'application/json'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = 'master_track.json'; a.click();
+  URL.revokeObjectURL(url);
+};
+
+/* MAIN LOAD */
+function startLoad(list){
+  cars = []; masterTrack = []; sectors = [];
+  dashContainer.innerHTML=''; legend.innerHTML='';
+  minX=Infinity; maxX=-Infinity; minY=Infinity; maxY=-Infinity;
+  const readers = list.map((f, idx) => {
+    return new Promise((res, rej) => {
+      const r = new FileReader();
+      r.onload = ev => res({text:ev.target.result, name:f.name, idx});
+      r.onerror = rej;
+      r.readAsText(f);
+    });
+  });
+  Promise.all(readers).then(files => {
+    files.forEach(f => parseCSV(f.text, f.name, f.idx));
+    // after all parsed and cars pushed, build master
+    buildMasterWithConfidence();
+  }).catch(err => alert("File load error: "+err));
+}
+
+/* PARSE CSV AND RECONSTRUCT POS */
+function parseCSV(text, name, idx){
+  const rows = text.trim().split('\n').filter(r=>r.trim());
+  if(rows.length < 2) return;
+  const headers = rows.shift().split(',').map(h=>h.trim());
+  const raw = rows.map(r=>{
+    const vals = r.split(',');
+    const o = {};
+    headers.forEach((h,i)=> o[h]=safe(vals[i]));
+    // but ensure timestampMS exists (fallback common names)
+    if(!('timestampMS' in o)) {
+      o.timestampMS = safe(vals[headers.indexOf('timestampMS')]) || safe(vals[headers.indexOf('timestamp')]) || 0;
+    }
+    return o;
+  });
+
+  // integrate with heading from lateral accel
+  let x=0,y=0,heading=0,dist=0;
+  raw[0].pos_x = 0; raw[0].pos_y = 0; raw[0].dist = 0;
+  for(let i=1;i<raw.length;i++){
+    const prev = raw[i-1], cur = raw[i];
+    let dt = (cur.timestampMS - prev.timestampMS)/1000;
+    if(!isFinite(dt) || dt<=0 || dt>MAX_DT) dt = MIN_DT;
+    if(cur.smooth_ax === undefined) cur.smooth_ax = cur.accel_x || 0;
+    cur.smooth_ax = cur.smooth_ax*0.85 + (cur.accel_x||0)*0.15;
+    const speed = Math.max(cur.speed_mps||0,0.1);
+    let yawRate = 0;
+    if(speed > 2) yawRate = cur.smooth_ax / speed;
+    heading += yawRate * dt;
+    const dx = Math.cos(heading) * speed * dt;
+    const dy = Math.sin(heading) * speed * dt;
+    x += dx; y += dy; dist += Math.hypot(dx,dy);
+    cur.pos_x = x; cur.pos_y = y; cur.dist = dist;
+  }
+
+  const totalDist = raw[raw.length-1].dist || 1;
+  const speedScale = Math.max(...raw.map(p=>p.speed_mph||0))*1.05 || 100;
+  cars.push({ name: basename(name), color: colors[idx%colors.length], data: raw, dataIndex:0, index:0, totalDist, speedScale });
+}
+
+/* BUILD MASTER with CONFIDENCE BAND */
+function buildMasterWithConfidence(){
+  if(!cars.length) return;
+  masterTrack = [];
+  minX=Infinity; maxX=-Infinity; minY=Infinity; maxY=-Infinity;
+
+  // helper to get interpolated position at dist for a run
+  function posAtDist(run, target){
+    const data = run.data;
+    if(target <= 0) return {x:data[0].pos_x, y:data[0].pos_y};
+    if(target >= run.totalDist) { const p=data[data.length-1]; return {x:p.pos_x, y:p.pos_y}; }
+    // binary search
+    let lo=0, hi=data.length-1;
+    while(lo<hi){
+      const mid = Math.floor((lo+hi)/2);
+      if(data[mid].dist < target) lo = mid+1; else hi = mid;
+    }
+    const hiIdx = Math.min(lo, data.length-1);
+    const loIdx = Math.max(0, hiIdx-1);
+    const a = data[loIdx], b = data[hiIdx];
+    const span = (b.dist - a.dist) || 1e-6;
+    const t = (target - a.dist) / span;
+    return { x: a.pos_x + (b.pos_x - a.pos_x)*t, y: a.pos_y + (b.pos_y - a.pos_y)*t };
+  }
+
+  // for each sample fraction compute positions and apply confidence filter
+  for(let i=0;i<SAMPLES;i++){
+    const frac = i/(SAMPLES-1);
+    const positions = [];
+    for(const run of cars){
+      const target = frac * run.totalDist;
+      positions.push(posAtDist(run, target));
+    }
+
+    // compute mean and std dev
+    const mean = positions.reduce((s,p)=>({x:s.x+p.x,y:s.y+p.y}), {x:0,y:0});
+    mean.x /= positions.length; mean.y /= positions.length;
+    const dists = positions.map(p => Math.hypot(p.x-mean.x, p.y-mean.y));
+    const meanDist = dists.reduce((s,v)=>s+v,0)/dists.length;
+    const variance = dists.reduce((s,v)=>s+(v-meanDist)*(v-meanDist),0)/dists.length;
+    const std = Math.sqrt(variance);
+
+    // filter: exclude if distance > meanDist + CONF_STD_MULT*std OR absolute > ABS_EXCLUDE_M
+    const included = [];
+    for(let j=0;j<positions.length;j++){
+      const pd = dists[j];
+      if(pd <= meanDist + CONF_STD_MULT*std && pd <= ABS_EXCLUDE_M) included.push(positions[j]);
+    }
+
+    const use = included.length ? included : positions; // if all excluded fallback to all
+    const avg = use.reduce((s,p)=>({x:s.x+p.x,y:s.y+p.y}), {x:0,y:0});
+    avg.x /= use.length; avg.y /= use.length;
+
+    masterTrack.push({x:avg.x, y:avg.y});
+    minX = Math.min(minX, avg.x); maxX = Math.max(maxX, avg.x);
+    minY = Math.min(minY, avg.y); maxY = Math.max(maxY, avg.y);
+  }
+
+  // compute cumulative dist along master
+  let cum = 0;
+  masterTrack[0].dist = 0;
+  for(let i=1;i<masterTrack.length;i++){
+    const dx = masterTrack[i].x - masterTrack[i-1].x;
+    const dy = masterTrack[i].y - masterTrack[i-1].y;
+    cum += Math.hypot(dx,dy);
+    masterTrack[i].dist = cum;
+  }
+  // protect against zero-range
+  if(minX===maxX){ minX-=1; maxX+=1; }
+  if(minY===maxY){ minY-=1; maxY+=1; }
+
+  buildSectors();
+  scrubber.max = masterTrack.length-1;
+  createDashboards();
+  updateLegend();
+  drawMasterTrack();
+}
+
+/* BUILD SECTORS by equal distance along master */
+function buildSectors(){
+  sectors = [];
+  if(!masterTrack.length) return;
+  const total = masterTrack[masterTrack.length-1].dist || 1;
+  for(let s=0;s<SECTORS;s++){
+    sectors.push((s/SECTORS) * total);
+  }
+  sectors.push(total); // final boundary
+}
+
+/* DASHBOARD building */
+function createDashboards(){
+  dashContainer.innerHTML='';
+  cars.forEach((car, i) => {
+    const div = document.createElement('div');
+    div.className = 'dash';
+    div.innerHTML = `
+      <h3 style="color:${car.color}">${car.name}</h3>
+      <canvas id="spd_${i}" width="260" height="260"></canvas>
+      <div class="gear" id="gear_${i}">N</div>
+      <div class="rpm-bar"><div class="rpm-fill" id="rpm_${i}"></div></div>
+      <table class="timing"><tr><th>Lap</th><th>Lap Time</th></tr><tr><td>Current</td><td id="lap_${i}">-</td></tr></table>
+      <div id="sectorBox_${i}"></div>
+    `;
+    dashContainer.appendChild(div);
+    car.ctx = document.getElementById(`spd_${i}`).getContext('2d');
+    car.gearEl = document.getElementById(`gear_${i}`);
+    car.rpmEl = document.getElementById(`rpm_${i}`);
+    car.lapEl = document.getElementById(`lap_${i}`);
+    car.sectorBox = document.getElementById(`sectorBox_${i}`);
+    car.dataIndex = 0;
+    car.index = 0;
+  });
+}
+
+/* LEGEND */
+function updateLegend(){
+  legend.innerHTML='';
+  cars.forEach(c=>{
+    const d = document.createElement('div'); d.className='legendItem';
+    d.innerHTML = `<span class="dot" style="background:${c.color}"></span> ${c.name}`;
+    legend.appendChild(d);
+  });
+}
+
+/* PLAYBACK: each car progresses on its own telemetry; its progress is mapped to master index */
+function play(){ playing = true; loop(); }
+function pause(){ playing = false; }
+
+function loop(){
+  if(!playing) return;
+  cars.forEach(car => {
+    if(car.dataIndex < car.data.length - 1) car.dataIndex++;
+    const d = car.data[car.dataIndex].dist || 0;
+    const pct = Math.max(0, Math.min(1, d / car.totalDist));
+    car.index = Math.floor(pct * (masterTrack.length - 1));
+  });
+  if(cars[0]) scrubber.value = cars[0].index;
+  updateDashboards();
+  drawCars();
+  requestAnimationFrame(loop);
+}
+
+/* scrubber seeking: map master index to target dist for each car */
+scrubber.addEventListener('input', e=>{
+  const v = parseInt(e.target.value);
+  if(!masterTrack.length) return;
+  const pct = v / (masterTrack.length - 1);
+  cars.forEach(car => {
+    const target = pct * car.totalDist;
+    let i = car.data.findIndex(p => p.dist >= target);
+    if(i === -1) i = car.data.length - 1;
+    car.dataIndex = i;
+    car.index = v;
+  });
+  updateDashboards();
+  drawCars();
+});
+
+/* DASH update: speedo, gear, RPM, lap times and sectors */
+function updateDashboards(){
+  // compute reference times for delta: use car 0 as reference
+  const ref = cars[0];
+  const refTime = ref ? (ref.data[ref.dataIndex] ? ref.data[ref.dataIndex].timestampMS : 0) : 0;
+
+  cars.forEach((car, ci) => {
+    const p = car.data[Math.min(car.dataIndex, car.data.length-1)];
+    drawSpeedo(car.ctx, p.speed_mph || 0, car.speedScale || 120);
+    car.gearEl.textContent = ('gear' in p && p.gear !== 0) ? String(p.gear) : 'N';
+    const rpmPct = (p.engine_rpm && p.engine_max_rpm) ? (p.engine_rpm / p.engine_max_rpm) : 0;
+    car.rpmEl.style.width = Math.max(0, Math.min(100, rpmPct*100)) + '%';
+
+    // lap time = current timestamp - first lap start (simple)
+    const startTime = car.data[0].timestampMS || 0;
+    const curTime = p.timestampMS || 0;
+    const lapMs = Math.max(0, curTime - startTime);
+    car.lapEl.textContent = formatMs(lapMs);
+
+    // compute sector times: find time when car passed each sector boundary (interpolate)
+    const secs = computeSectorTimesForRun(car);
+    renderSectors(ci, secs);
+
+    // show delta to reference (current time difference)
+    if(ref && ci > 0){
+      const refP = ref.data[Math.min(ref.dataIndex, ref.data.length-1)];
+      const diffS = ((p.timestampMS||0) - (refP.timestampMS||0)) / 1000;
+      // include delta in lap field alongside time
+      car.lapEl.textContent = `${formatMs(lapMs)}  (${diffS>=0?'+':''}${diffS.toFixed(2)}s vs ${ref.name})`;
+    }
+  });
+}
+
+/* compute times when the run crossed each sector boundary (returns array of ms times since run start or null) */
+function computeSectorTimesForRun(car){
+  if(!masterTrack.length) return [];
+  const total = car.totalDist || 1;
+  const out = [];
+  const data = car.data;
+  for(let s=1;s<=SECTORS;s++){
+    const targetDist = (s/SECTORS) * total;
+    // find first index where dist >= targetDist
+    let i = data.findIndex(p => p.dist >= targetDist);
+    if(i === -1) { out.push(null); continue; }
+    if(i === 0) { out.push(data[0].timestampMS - data[0].timestampMS); continue; }
+    const a = data[i-1], b = data[i];
+    const span = (b.dist - a.dist) || 1e-6;
+    const t = (targetDist - a.dist) / span;
+    const ts = a.timestampMS + t * (b.timestampMS - a.timestampMS);
+    out.push(Math.max(0, ts - data[0].timestampMS));
+  }
+  return out; // array length SECTORS with times for each boundary (ms)
+}
+
+/* render sector box for each car (sector times & deltas) */
+function renderSectors(carIdx, secs){
+  const car = cars[carIdx];
+  car.sectorBox.innerHTML = '';
+  if(!secs || secs.length === 0) return;
+  // compute sector durations from boundaries
+  const durations = [];
+  let prev = 0;
+  for(let i=0;i<secs.length;i++){
+    const val = secs[i];
+    if(val === null) durations.push(null);
+    else {
+      durations.push(val - prev); prev = val;
+    }
+  }
+  // find best per sector across all cars for highlighting
+  const best = durations.map((_,si)=>{
+    let b = Infinity, idx = -1;
+    cars.forEach((c,ci)=>{
+      const sTimes = computeSectorTimesForRun(c);
+      const dur = sTimes[si] ? (sTimes[si] - (si? sTimes[si-1]: 0)) : null;
+      if(dur != null && dur < b){ b = dur; idx = ci; }
+    });
+    return {bestTime: isFinite(b)?b:null, bestIdx: idx};
+  });
+
+  const tbl = document.createElement('table');
+  tbl.className = 'timing';
+  const hdr = document.createElement('tr');
+  hdr.innerHTML = `<th>Sector</th><th>Time</th><th>Delta</th>`;
+  tbl.appendChild(hdr);
+
+  for(let si=0; si<SECTORS; si++){
+    const row = document.createElement('tr');
+    const dur = durations[si];
+    const bestObj = best[si];
+    const bestTime = bestObj.bestTime;
+    let deltaText = '-';
+    if(dur != null && bestTime != null) {
+      const d = (dur - bestTime)/1000;
+      deltaText = (d>0?'+':'') + d.toFixed(3) + 's';
+    }
+    const timeText = dur==null? '-' : formatMs(dur);
+    row.innerHTML = `<td>${si+1}${bestObj.bestIdx===carIdx? ' ★' : ''}</td><td>${timeText}</td><td>${deltaText}</td>`;
+    tbl.appendChild(row);
+  }
+  car.sectorBox.appendChild(tbl);
+}
+
+/* DRAW speedo */
+function drawSpeedo(ctx, speed, maxSpeed){
+  ctx.clearRect(0,0,260,260);
+  const cx = 130, cy = 150, r = 100;
+  ctx.beginPath(); ctx.arc(cx,cy,r,Math.PI,0); ctx.strokeStyle="#444"; ctx.lineWidth=8; ctx.stroke();
+  const pct = Math.max(0, Math.min(1, speed / (maxSpeed || 120)));
+  const ang = Math.PI + pct * Math.PI;
+  ctx.beginPath(); ctx.moveTo(cx,cy); ctx.lineTo(cx+Math.cos(ang)*r, cy+Math.sin(ang)*r);
+  ctx.strokeStyle = "red"; ctx.lineWidth = 4; ctx.stroke();
+  ctx.fillStyle = "white"; ctx.font = "20px Arial"; ctx.textAlign = "center";
+  ctx.fillText(Math.round(speed) + " MPH", cx, 235);
+}
+
+/* MASTER DRAW */
+function worldToCanvas(x,y){
+  const pad = 40;
+  const sx = (trackCanvas.width - pad*2) / (maxX - minX || 1);
+  const sy = (trackCanvas.height - pad*2) / (maxY - minY || 1);
+  const s = Math.min(sx, sy);
+  return { x: pad + (x - minX)*s, y: trackCanvas.height - (pad + (y - minY)*s) };
+}
+
+function drawMasterTrack(){
+  if(!masterTrack.length) return;
+  trackCtx.clearRect(0,0,trackCanvas.width,trackCanvas.height);
+  // draw full background line
+  trackCtx.globalAlpha = 0.22;
+  for(let i=1;i<masterTrack.length;i++){
+    const a = worldToCanvas(masterTrack[i-1].x, masterTrack[i-1].y);
+    const b = worldToCanvas(masterTrack[i].x, masterTrack[i].y);
+    trackCtx.beginPath(); trackCtx.moveTo(a.x,a.y); trackCtx.lineTo(b.x,b.y);
+    trackCtx.strokeStyle = "#888"; trackCtx.lineWidth = 3; trackCtx.stroke();
+  }
+  trackCtx.globalAlpha = 1.0;
+
+  // draw sector separators
+  const total = masterTrack[masterTrack.length-1].dist || 1;
+  for(let s=1;s<SECTORS;s++){
+    const target = (s/SECTORS) * total;
+    const idx = masterTrack.findIndex(p => p.dist >= target);
+    if(idx !== -1){
+      const pt = worldToCanvas(masterTrack[idx].x, masterTrack[idx].y);
+      trackCtx.beginPath();
+      trackCtx.arc(pt.x, pt.y, 6, 0, Math.PI*2);
+      trackCtx.fillStyle = "#fff"; trackCtx.fill();
+    }
+  }
+}
+
+/* draw cars on master (snap) */
+function drawCars(){
+  drawMasterTrack();
+  for(const car of cars){
+    const idx = Math.max(0, Math.min(masterTrack.length - 1, Math.floor(car.index)));
+    const m = masterTrack[idx] || masterTrack[0] || {x:0,y:0};
+    const c = worldToCanvas(m.x, m.y);
+    // small tail
+    trackCtx.beginPath();
+    for(let t=Math.max(0, idx-8); t<=idx; t++){
+      const pt = masterTrack[t] || m;
+      const cp = worldToCanvas(pt.x, pt.y);
+      if(t === Math.max(0, idx-8)) trackCtx.moveTo(cp.x, cp.y);
+      else trackCtx.lineTo(cp.x, cp.y);
+    }
+    trackCtx.strokeStyle = car.color; trackCtx.lineWidth = 3; trackCtx.stroke();
+    // dot
+    trackCtx.beginPath();
+    trackCtx.arc(c.x, c.y, 7, 0, Math.PI*2);
+    trackCtx.fillStyle = car.color; trackCtx.fill();
+  }
+}
+
+/* UTIL */
+function formatMs(ms){
+  if(ms==null) return '-';
+  const s = Math.floor(ms/1000);
+  const msRem = Math.floor(ms%1000);
+  const mm = Math.floor(s/60);
+  const ss = s%60;
+  return `${mm}:${String(ss).padStart(2,'0')}.${String(msRem).padStart(3,'0')}`;
+}
+
+/* DEBUG clear */
+function clearAll(){ cars=[]; masterTrack=[]; dashContainer.innerHTML=''; legend.innerHTML=''; trackCtx.clearRect(0,0,trackCanvas.width,trackCanvas.height); scrubber.value=0; scrubber.max=0; }
+
+window.__debug = { cars, masterTrack, drawCars, drawMasterTrack, clearAll };
+
+/* END */
+</script>
+</body>
+</html>
+
