@@ -31,7 +31,8 @@ export function drawMasterTrack({
   maxY,
   lens,
   cars,
-  speedToColor
+  speedToColor,
+  confidenceToggle
 }) {
   trackCtx.setTransform(1, 0, 0, 1, 0, 0);
   trackCtx.clearRect(0, 0, trackCanvas.width, trackCanvas.height);
@@ -82,6 +83,7 @@ export function drawMasterTrack({
       const a = toCanvas(masterTrack[i - 1].x, masterTrack[i - 1].y);
       const b = toCanvas(masterTrack[i].x, masterTrack[i].y);
       let color = "#9097A0";
+      let alpha = 0.95;
 
       const v = masterTrack[i].heatSpeed;
       if (v != null && window.__heatRange) {
@@ -90,27 +92,50 @@ export function drawMasterTrack({
         color = speedToColor(norm);
       }
 
+      if (confidenceToggle?.checked && masterTrack[i].confidence != null && (masterTrack[i].supportTotal || 0) > 1) {
+        const c = Math.max(0, Math.min(1, masterTrack[i].confidence));
+        const confColor = confidenceToColor(c); // purple -> green
+        if (drawHeat) {
+          const mixed = blendColors(color, confColor, 0.5);
+          color = `rgb(${mixed.r},${mixed.g},${mixed.b})`;
+          alpha = alpha * (0.35 + c * 0.65);
+        } else {
+          color = `rgba(${confColor.r}, ${confColor.g}, ${confColor.b}, ${(0.6 + 0.4 * c).toFixed(2)})`;
+          alpha = 1.0;
+        }
+      }
+
       trackCtx.beginPath();
       trackCtx.moveTo(a.x, a.y);
       trackCtx.lineTo(b.x, b.y);
       trackCtx.strokeStyle = color;
       trackCtx.lineWidth = 3;
-      trackCtx.globalAlpha = 0.95;
+      trackCtx.globalAlpha = alpha;
       trackCtx.stroke();
     }
     trackCtx.globalAlpha = 1.0;
   } else {
-    // fallback plain track
-    trackCtx.strokeStyle = "#9097A0";
-    trackCtx.lineWidth = 2.5;
-    trackCtx.beginPath();
+    // fallback plain track with optional confidence tint
     for (let i = 1; i < n; i++) {
       const a = toCanvas(masterTrack[i - 1].x, masterTrack[i - 1].y);
       const b = toCanvas(masterTrack[i].x, masterTrack[i].y);
-      if (i === 1) trackCtx.moveTo(a.x, a.y);
+      let color = "#9097A0";
+      let alpha = 0.9;
+      if (confidenceToggle?.checked && masterTrack[i].confidence != null && (masterTrack[i].supportTotal || 0) > 1) {
+        const c = Math.max(0, Math.min(1, masterTrack[i].confidence));
+        const confColor = confidenceToColor(c);
+        color = `rgba(${confColor.r}, ${confColor.g}, ${confColor.b}, ${(0.6 + 0.35 * c).toFixed(2)})`;
+        alpha = 1.0;
+      }
+      trackCtx.beginPath();
+      trackCtx.moveTo(a.x, a.y);
       trackCtx.lineTo(b.x, b.y);
+      trackCtx.strokeStyle = color;
+      trackCtx.lineWidth = 3;
+      trackCtx.globalAlpha = alpha;
+      trackCtx.stroke();
     }
-    trackCtx.stroke();
+    trackCtx.globalAlpha = 1.0;
   }
 
   // Start / end markers
@@ -224,6 +249,41 @@ export function drawMasterTrack({
     trackCtx.stroke();
     trackCtx.setLineDash([]);
   }
+}
+
+// Helper: parse rgb(...) or #hex into components (basic support for our generated colors)
+function colorToRgb(str) {
+  if (!str) return {r: 144, g: 151, b: 160}; // fallback gray
+  if (str.startsWith("#")) {
+    const hex = str.slice(1);
+    const v = parseInt(hex.length === 3 ? hex.split("").map(c => c + c).join("") : hex, 16);
+    return {r: (v >> 16) & 255, g: (v >> 8) & 255, b: v & 255};
+  }
+  const m = str.match(/rgb\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)/i);
+  if (m) return {r: +m[1], g: +m[2], b: +m[3]};
+  return {r: 144, g: 151, b: 160};
+}
+
+function confidenceToColor(conf) {
+  // 0 => purple, 1 => green
+  const low = {r: 122, g: 59, b: 255};   // #7a3bff
+  const high = {r: 62, g: 233, b: 138};  // #3ee98a
+  const t = Math.max(0, Math.min(1, conf));
+  return {
+    r: Math.round(low.r + (high.r - low.r) * t),
+    g: Math.round(low.g + (high.g - low.g) * t),
+    b: Math.round(low.b + (high.b - low.b) * t)
+  };
+}
+
+function blendColors(baseStr, overlay, mix = 0.5) {
+  const base = colorToRgb(baseStr);
+  const t = Math.max(0, Math.min(1, mix));
+  return {
+    r: Math.round(base.r * (1 - t) + overlay.r * t),
+    g: Math.round(base.g * (1 - t) + overlay.g * t),
+    b: Math.round(base.b * (1 - t) + overlay.b * t)
+  };
 }
 
 /**

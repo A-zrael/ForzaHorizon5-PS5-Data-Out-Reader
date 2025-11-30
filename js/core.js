@@ -50,6 +50,7 @@ import {createLayoutManager} from "./layout.js";
     const COLL_SPEED_DROP_MAX = 9;
     const COLL_ACCEL_THRESH = 6;
     const EVENT_MIN_GAP_IDX = 30;
+    const TRACK_MAD_K = 2.5; // outlier cutoff multiplier for master track fusion
 
     const EVENT_CLUSTER_THRESHOLD = 14;
     const EVENT_LANE_OFFSET = 8;
@@ -113,6 +114,7 @@ import {createLayoutManager} from "./layout.js";
     const sectorCountEl = document.getElementById("sectorCount");
     const deltaModeEl = document.getElementById("deltaMode");
     const heatToggle = document.getElementById("heatToggle");
+    const confidenceToggle = document.getElementById("confidenceToggle");
     const eventCanvas = document.getElementById("eventTimeline");
     const eventCtx = eventCanvas.getContext("2d");
     const deltaCanvas = document.getElementById("deltaTimeline");
@@ -420,6 +422,12 @@ import {createLayoutManager} from "./layout.js";
     [showTrackSectorsEl, showSectorsEl].forEach(el => {
       if (el) el.addEventListener("change", () => {drawMasterTrack();});
     });
+    if (heatToggle) {
+      heatToggle.addEventListener("change", () => drawMasterTrack());
+    }
+    if (confidenceToggle) {
+      confidenceToggle.addEventListener("change", () => drawMasterTrack());
+    }
     if (sectorCountEl) {
       sectorCountEl.addEventListener("change", () => {sectorCount = parseInt(sectorCountEl.value, 10) || 4; drawMasterTrack();});
     }
@@ -581,6 +589,7 @@ import {createLayoutManager} from "./layout.js";
       if (!cars.length) return;
       masterTrack = [];
       minX = Infinity; maxX = -Infinity; minY = Infinity; maxY = -Infinity;
+      const useRobustFusion = cars.length > 1;
 
       let segments;
 
@@ -635,26 +644,49 @@ import {createLayoutManager} from "./layout.js";
         return {x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t};
       }
 
+      const median = (arr) => {
+        if (!arr.length) return 0;
+        const copy = [...arr].sort((a, b) => a - b);
+        const mid = copy.length >> 1;
+        if (copy.length % 2) return copy[mid];
+        return (copy[mid - 1] + copy[mid]) * 0.5;
+      };
+
       for (let i = 0; i < SAMPLES; i++) {
         const frac = i / (SAMPLES - 1);
         const pts = segments.map(s => posAtDist(s, frac * s.lapLen));
 
-        let mx = 0, my = 0;
-        pts.forEach(p => {mx += p.x; my += p.y;});
-        mx /= pts.length; my /= pts.length;
-
-        const dists = pts.map(p => Math.hypot(p.x - mx, p.y - my));
-        const filtered = [];
-        for (let j = 0; j < pts.length; j++) {
-          if (dists[j] <= ABS_EXCLUDE_M) filtered.push(pts[j]);
-        }
-        const use = filtered.length ? filtered : pts;
-
+        // Robust fuse across all cars: median center, then MAD-based outlier rejection.
+        // Geometry: average of all cars at this arc-length (keeps path stable).
         let ax = 0, ay = 0;
-        use.forEach(p => {ax += p.x; ay += p.y;});
-        ax /= use.length; ay /= use.length;
+        pts.forEach(p => {ax += p.x; ay += p.y;});
+        ax /= pts.length; ay /= pts.length;
 
-        masterTrack.push({x: ax, y: ay});
+        // Confidence: fraction of cars that agree within a MAD-based gate (only meaningful with >1 car).
+        let confidence = 1;
+        let support = pts.length;
+        if (useRobustFusion) {
+          const xs = pts.map(p => p.x);
+          const ys = pts.map(p => p.y);
+          const medX = median(xs);
+          const medY = median(ys);
+          const dists = pts.map(p => Math.hypot(p.x - medX, p.y - medY));
+          const medDist = median(dists);
+          const madDist = median(dists.map(d => Math.abs(d - medDist)));
+          const scaledMad = madDist * 1.4826;
+          const gate = (scaledMad > 0 ? medDist + TRACK_MAD_K * scaledMad : ABS_EXCLUDE_M);
+          const gateCap = ABS_EXCLUDE_M * 2;
+          support = dists.filter(d => d <= gate && d <= gateCap).length;
+          confidence = support / Math.max(1, pts.length);
+        }
+
+        masterTrack.push({
+          x: ax,
+          y: ay,
+          confidence,
+          support,
+          supportTotal: pts.length
+        });
       }
 
       recomputeBoundsFromMaster();
@@ -1090,7 +1122,8 @@ import {createLayoutManager} from "./layout.js";
         maxY,
         lens: lensState,
         cars,
-        speedToColor
+        speedToColor,
+        confidenceToggle
       });
       drawCars();
     }
