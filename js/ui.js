@@ -110,10 +110,12 @@ export function updateLegend({legendEl, cars}) {
 /**
  * Sync the scrubber range with the longest telemetry series.
  */
-export function setupScrubber({scrubber, cars}) {
-  const maxFrames = Math.max(...cars.map(c => c.data.length));
-  scrubber.max = Math.max(0, maxFrames - 1);
+export function setupScrubber({scrubber, getMaxDurationMs}) {
+  if (!scrubber) return;
+  const maxMs = Math.max(0, Math.round(getMaxDurationMs ? getMaxDurationMs() : 0));
+  scrubber.max = maxMs;
   scrubber.value = 0;
+  scrubber.step = 1;
 }
 
 /**

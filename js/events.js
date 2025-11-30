@@ -1,5 +1,12 @@
 // events.js - event detection and timeline rendering helpers
 
+const sampleTimestamp = (p) => {
+  if (!p || typeof p !== "object") return 0;
+  if (p.timestampMS != null) return p.timestampMS;
+  if (p.timestamp != null) return p.timestamp;
+  return 0;
+};
+
 /**
  * Compute lap index for a given data sample index.
  */
@@ -10,6 +17,13 @@ function getLapForIndex(car, idx) {
     if (idx >= laps[i]) {lap = i + 1; break;}
   }
   return lap;
+}
+
+function carDurationMs(car) {
+  if (!car || !car.data || !car.data.length) return 0;
+  const first = car.data[0];
+  const last = car.data[car.data.length - 1];
+  return Math.max(0, sampleTimestamp(last) - sampleTimestamp(first));
 }
 
 /**
@@ -217,8 +231,8 @@ export function drawEventTimeline({
   eventCtx.clearRect(0, 0, eventCanvas.width, eventCanvas.height);
   if (!cars.length) return;
 
-  const maxFrames = Math.max(...cars.map(c => c.data.length));
-  if (maxFrames <= 1) return;
+  const maxDurationMs = Math.max(...cars.map(carDurationMs));
+  if (maxDurationMs <= 0) return;
 
   const padX = 30;
   const padY = 10;
@@ -229,22 +243,30 @@ export function drawEventTimeline({
   if (timelineMode === 'unified') {
     const y = eventCanvas.height / 2;
     cars.forEach(car => {
+      const d = car.data;
+      if (!d || !d.length) return;
       car.events.forEach(ev => {
         if (!eventTypeVisible(ev.type, showCrash, showCollision, showOvertake, showFastLap, showLapStart)) return;
-        const tFrac = ev.idx / (maxFrames - 1);
+        const sample = d[Math.min(ev.idx, d.length - 1)];
+        const evTime = Math.max(0, sampleTimestamp(sample) - sampleTimestamp(d[0]));
+        const tFrac = Math.min(1, evTime / maxDurationMs);
         const x = padX + tFrac * innerW;
-        drawable.push({car, ev, x, baseY: y});
+        drawable.push({car, ev, x, baseY: y, timeMs: evTime});
       });
     });
   } else {
     const rowH = innerH / cars.length;
     cars.forEach((car, ci) => {
       const cy = padY + rowH * (ci + 0.5);
+      const d = car.data;
+      if (!d || !d.length) return;
       car.events.forEach(ev => {
         if (!eventTypeVisible(ev.type, showCrash, showCollision, showOvertake, showFastLap, showLapStart)) return;
-        const tFrac = ev.idx / (maxFrames - 1);
+        const sample = d[Math.min(ev.idx, d.length - 1)];
+        const evTime = Math.max(0, sampleTimestamp(sample) - sampleTimestamp(d[0]));
+        const tFrac = Math.min(1, evTime / maxDurationMs);
         const x = padX + tFrac * innerW;
-        drawable.push({car, ev, x, baseY: cy});
+        drawable.push({car, ev, x, baseY: cy, timeMs: evTime});
       });
     });
   }
@@ -294,7 +316,7 @@ export function drawEventTimeline({
       const lane = i - mid;
       const y = item.baseY + lane * EVENT_LANE_OFFSET;
       drawEventIcon({ctx: eventCtx, ev: item.ev, carColor: item.car.color, x: item.x, y});
-      drawn.push({car: item.car, ev: item.ev, x: item.x, y});
+      drawn.push({car: item.car, ev: item.ev, x: item.x, y, timeMs: item.timeMs});
     });
   });
 

@@ -72,6 +72,7 @@ import {createLayoutManager} from "./layout.js";
     let lensActive = false;
     let lensX = 0, lensY = 0;
     const LENS_RADIUS = 60;
+    let playheadMs = 0;
     // --- Magnifier smoothing ---
     let lensSmoothX = 0;
     let lensSmoothY = 0;
@@ -146,6 +147,12 @@ import {createLayoutManager} from "./layout.js";
 
     const safe = v => {const n = parseFloat(v); return Number.isFinite(n) ? n : 0;};
     const clamp01 = x => Math.max(0, Math.min(1, x));
+    const sampleTimestamp = (p) => {
+      if (!p || typeof p !== "object") return 0;
+      if (p.timestampMS != null) return p.timestampMS;
+      if (p.timestamp != null) return p.timestamp;
+      return 0;
+    };
     function speedToColor(norm) {
       norm = clamp01(norm);
       // Palette C: slow = red (#FF3030), mid = yellow (#FFD000), fast = mint green (#00FF80)
@@ -187,6 +194,16 @@ import {createLayoutManager} from "./layout.js";
       const sign = s >= 0 ? '+' : '-';
       const abs = Math.abs(s);
       return sign + abs.toFixed(3) + 's';
+    }
+    const carDurationMs = (car) => {
+      if (!car || !car.data || !car.data.length) return 0;
+      const first = car.data[0];
+      const last = car.data[car.data.length - 1];
+      return Math.max(0, sampleTimestamp(last) - sampleTimestamp(first));
+    };
+    function getMaxDurationMs() {
+      if (!cars.length) return 0;
+      return Math.max(...cars.map(carDurationMs));
     }
 
     toggleSetupBtn.addEventListener("click", () => {
@@ -413,6 +430,7 @@ import {createLayoutManager} from "./layout.js";
     };
 
     function startLoad(files) {
+      playbackController.pause();
       cars = [];
       dashContainer.innerHTML = "";
       legend.innerHTML = "";
@@ -448,6 +466,7 @@ import {createLayoutManager} from "./layout.js";
         updateAllInputModels();
         drawMasterTrack();
         setupScrubber();
+        setPlayheadMs(0);
         cars.forEach(c => c.events = []);
         detectEventsAllCars();
         drawEventTimeline();
@@ -501,6 +520,9 @@ import {createLayoutManager} from "./layout.js";
 
       const totalDist = data[data.length - 1].dist || 1;
       const speedScale = Math.max(...data.map(p => p.speed_mph || 0)) * 1.05 || 100;
+      const startTimeMs = sampleTimestamp(data[0]);
+      const endTimeMs = sampleTimestamp(data[data.length - 1]);
+      const durationMs = Math.max(0, endTimeMs - startTimeMs);
 
       cars.push({
         name: basename(name),
@@ -510,6 +532,9 @@ import {createLayoutManager} from "./layout.js";
         index: 0,
         totalDist,
         speedScale,
+        startTimeMs,
+        endTimeMs,
+        durationMs,
         lapStarts: [],
         lapLen: null,
         sectorBox: null,
@@ -729,7 +754,41 @@ import {createLayoutManager} from "./layout.js";
     }
 
     function setupScrubber() {
-      setupScrubberUI({scrubber, cars});
+      setupScrubberUI({scrubber, getMaxDurationMs});
+    }
+
+    function findIndexForTime(car, elapsedMs) {
+      const d = car.data;
+      if (!d.length) return 0;
+      const t0 = (car.startTimeMs != null) ? car.startTimeMs : sampleTimestamp(d[0]);
+      const target = t0 + Math.max(0, elapsedMs);
+      const lastIdx = d.length - 1;
+      const lastTs = sampleTimestamp(d[lastIdx]);
+      if (target >= lastTs) return lastIdx;
+      if (target <= sampleTimestamp(d[0])) return 0;
+      let lo = 0, hi = lastIdx;
+      while (lo < hi) {
+        const mid = (lo + hi + 1) >> 1;
+        const ts = sampleTimestamp(d[mid]);
+        if (ts <= target) {
+          lo = mid;
+        } else {
+          hi = mid - 1;
+        }
+      }
+      return lo;
+    }
+
+    function setPlayheadMs(ms) {
+      const maxMs = getMaxDurationMs();
+      playheadMs = Math.max(0, Math.min(ms, maxMs));
+      cars.forEach(car => {
+        car.dataIndex = findIndexForTime(car, playheadMs);
+        updateCarTrackIndex(car);
+      });
+      if (scrubber) {
+        scrubber.value = playheadMs;
+      }
     }
 
     function renderFrame({smoothLens}) {
@@ -751,7 +810,8 @@ import {createLayoutManager} from "./layout.js";
       pauseBtn,
       scrubber,
       cars,
-      updateCarTrackIndex,
+      getMaxDurationMs,
+      setPlayheadMs,
       onFrame: renderFrame
     });
 
@@ -1355,12 +1415,14 @@ import {createLayoutManager} from "./layout.js";
 
       const hit = findNearestEventAtPixelModule({eventCanvas, x, y, clickMode: true});
       if (hit) {
+        const car = hit.car;
+        const d = car?.data || [];
         const idx = hit.ev.idx;
-        scrubber.value = idx;
-        cars.forEach(car => {
-          car.dataIndex = Math.min(idx, car.data.length - 1);
-          updateCarTrackIndex(car);
-        });
+        const sample = d[Math.min(idx, d.length - 1)];
+        const base = d[0];
+        const targetMsRaw = Math.max(0, sampleTimestamp(sample) - sampleTimestamp(base));
+        const targetMs = (hit.timeMs != null ? hit.timeMs : targetMsRaw);
+        playbackController.setPlayheadMs(targetMs);
         renderFrame({smoothLens: false});
       }
     });
