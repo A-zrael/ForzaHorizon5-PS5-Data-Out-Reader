@@ -68,6 +68,15 @@
       <button id="saveTrackPngBtn" class="small">Save track PNG</button>
     </div>
 
+    <div class="controls">
+      <span style="color:var(--text-soft);">Lap detect:</span>
+      <label>Radius (m): <input type="number" id="lapRadiusInput" min="1" max="200" step="1" style="width:70px;"></label>
+      <label>Min speed (m/s): <input type="number" id="lapMinSpeedInput" min="0" max="60" step="0.5" style="width:80px;"></label>
+      <label>Min samples: <input type="number" id="minLapSamplesInput" min="1" max="2000" step="10" style="width:80px;"></label>
+      <label>Min lap dist (m): <input type="number" id="minLapDistanceInput" min="10" max="200000" step="100" style="width:90px;"></label>
+      <button id="applyLapDetectBtn" class="small">Apply lap detect</button>
+    </div>
+
     <div class="controls" id="eventControls">
       <span style="color:var(--text-soft);">Timeline mode:</span>
       <button id="timelineUnified" class="small">Unified</button>

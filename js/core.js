@@ -33,9 +33,14 @@ import {createLayoutManager} from "./layout.js";
 
 // --- core.js (updated with exports) ---
     const SAMPLES = 800;
-    const LAP_RADIUS = 20;
-    const LAP_MIN_SPEED = 8;
-    const MIN_LAP_SAMPLES = 300;
+    const LAP_RADIUS_DEFAULT = 20;
+    const LAP_MIN_SPEED_DEFAULT = 8;
+    const MIN_LAP_SAMPLES_DEFAULT = 300;
+    const MIN_LAP_DISTANCE_DEFAULT = 1000; // meters
+    let lapRadius = LAP_RADIUS_DEFAULT;
+    let lapMinSpeed = LAP_MIN_SPEED_DEFAULT;
+    let minLapSamples = MIN_LAP_SAMPLES_DEFAULT;
+    let minLapDistance = MIN_LAP_DISTANCE_DEFAULT;
     const ABS_EXCLUDE_M = 12;
     const LOOP_CLOSE_FRACTION = 0.9;
     const LOOP_MIN_GAP = 0.5;
@@ -147,6 +152,11 @@ import {createLayoutManager} from "./layout.js";
     const showOvertakeEl = document.getElementById("showOvertake");
     const showFastLapEl = document.getElementById("showFastLap");
     const showLapStartEl = document.getElementById("showLapStart");
+    const lapRadiusInput = document.getElementById("lapRadiusInput");
+    const lapMinSpeedInput = document.getElementById("lapMinSpeedInput");
+    const minLapSamplesInput = document.getElementById("minLapSamplesInput");
+    const minLapDistanceInput = document.getElementById("minLapDistanceInput");
+    const applyLapDetectBtn = document.getElementById("applyLapDetectBtn");
 
     const playBtn = document.getElementById("playBtn");
     const pauseBtn = document.getElementById("pauseBtn");
@@ -200,6 +210,12 @@ import {createLayoutManager} from "./layout.js";
       const sign = s >= 0 ? '+' : '-';
       const abs = Math.abs(s);
       return sign + abs.toFixed(3) + 's';
+    }
+    function setLapInputsFromState() {
+      if (lapRadiusInput) lapRadiusInput.value = lapRadius;
+      if (lapMinSpeedInput) lapMinSpeedInput.value = lapMinSpeed;
+      if (minLapSamplesInput) minLapSamplesInput.value = minLapSamples;
+      if (minLapDistanceInput) minLapDistanceInput.value = minLapDistance;
     }
     const carDurationMs = (car) => {
       if (!car || !car.data || !car.data.length) return 0;
@@ -441,6 +457,21 @@ import {createLayoutManager} from "./layout.js";
     if (confidenceToggle) {
       confidenceToggle.addEventListener("change", () => drawMasterTrack());
     }
+    if (applyLapDetectBtn) {
+      setLapInputsFromState();
+      applyLapDetectBtn.addEventListener("click", () => {
+        const r = parseFloat(lapRadiusInput?.value);
+        const s = parseFloat(lapMinSpeedInput?.value);
+        const m = parseInt(minLapSamplesInput?.value, 10);
+        const d = parseFloat(minLapDistanceInput?.value);
+        lapRadius = Number.isFinite(r) && r > 0 ? r : LAP_RADIUS_DEFAULT;
+        lapMinSpeed = Number.isFinite(s) && s >= 0 ? s : LAP_MIN_SPEED_DEFAULT;
+        minLapSamples = Number.isFinite(m) && m > 0 ? m : MIN_LAP_SAMPLES_DEFAULT;
+        minLapDistance = Number.isFinite(d) && d > 0 ? d : MIN_LAP_DISTANCE_DEFAULT;
+        detectLapsForAll();
+        rebuildAll();
+      });
+    }
     if (sectorCountEl) {
       sectorCountEl.addEventListener("change", () => {sectorCount = parseInt(sectorCountEl.value, 10) || 4; drawMasterTrack();});
     }
@@ -481,30 +512,7 @@ import {createLayoutManager} from "./layout.js";
       Promise.all(readers).then(list => {
         list.forEach(f => parseCSV(f.text, f.name, f.idx));
         detectLapsForAll();
-        if (!masterLockedFromJSON) {
-          autoDetectRaceTypeFromCars();
-          buildMasterFromTelemetry();
-          updateMasterSpeedProfile();
-        } else {
-          ensureMasterDist();
-          recomputeBoundsFromMaster();
-          autoDetectRaceTypeFromMaster();
-        }
-        playbackController.setCars(cars);
-        createDashboards();
-        updateLegend();
-        updateAllDeltaModels();
-        updateAllInputModels();
-        drawMasterTrack();
-        setupScrubber();
-        setPlayheadMs(0);
-        cars.forEach(c => c.events = []);
-        detectEventsAllCars();
-        drawEventTimeline();
-        drawDeltaTimeline();
-        drawInputTimeline();
-        computeResults();
-        resizeLayout();
+        rebuildAll();
       }).catch(err => alert("File load error: " + err));
     }
 
@@ -586,21 +594,27 @@ import {createLayoutManager} from "./layout.js";
         const d = car.data;
         if (!d.length) {car.lapStarts = [0]; return;}
         const startX = d[0].pos_x;
-        const startY = d[0].pos_y;
-        const laps = [0];
-        let lastIdx = 0;
+      const startY = d[0].pos_y;
+      const laps = [0];
+      let lastIdx = 0;
 
-        for (let i = 1; i < d.length; i++) {
-          const dx = d[i].pos_x - startX;
-          const dy = d[i].pos_y - startY;
-          const dist0 = Math.hypot(dx, dy);
-          const speed = d[i].speed_mps || (d[i].speed_kph / 3.6) || (d[i].speed_mph / 2.23694) || 0;
-          if (dist0 < LAP_RADIUS && speed > LAP_MIN_SPEED && (i - lastIdx) > MIN_LAP_SAMPLES) {
-            laps.push(i);
-            lastIdx = i;
-          }
+      for (let i = 1; i < d.length; i++) {
+        const dx = d[i].pos_x - startX;
+        const dy = d[i].pos_y - startY;
+        const dist0 = Math.hypot(dx, dy);
+        const speed = d[i].speed_mps || (d[i].speed_kph / 3.6) || (d[i].speed_mph / 2.23694) || 0;
+        const distSinceLast = d[i].dist - d[lastIdx].dist;
+        if (
+          dist0 < lapRadius &&
+          speed > lapMinSpeed &&
+          (i - lastIdx) > minLapSamples &&
+          distSinceLast > minLapDistance
+        ) {
+          laps.push(i);
+          lastIdx = i;
         }
-        car.lapStarts = laps;
+      }
+      car.lapStarts = laps;
         if (laps.length > 1) {
           car.lapLen = d[laps[1]].dist - d[laps[0]].dist;
         } else {
@@ -875,6 +889,33 @@ import {createLayoutManager} from "./layout.js";
         return `<span class="${cls}"><span style="color:${c.color};">●</span> ${posLabel} • ${c.name} • ${timeText} • ${gapText}</span>`;
       }).join("");
       resultsBar.innerHTML = html;
+    }
+
+    function rebuildAll() {
+      if (!masterLockedFromJSON) {
+        autoDetectRaceTypeFromCars();
+        buildMasterFromTelemetry();
+        updateMasterSpeedProfile();
+      } else {
+        ensureMasterDist();
+        recomputeBoundsFromMaster();
+        autoDetectRaceTypeFromMaster();
+      }
+      playbackController.setCars(cars);
+      createDashboards();
+      updateLegend();
+      updateAllDeltaModels();
+      updateAllInputModels();
+      drawMasterTrack();
+      setupScrubber();
+      setPlayheadMs(0);
+      cars.forEach(c => c.events = []);
+      detectEventsAllCars();
+      drawEventTimeline();
+      drawDeltaTimeline();
+      drawInputTimeline();
+      computeResults();
+      resizeLayout();
     }
 
     function setupScrubber() {
