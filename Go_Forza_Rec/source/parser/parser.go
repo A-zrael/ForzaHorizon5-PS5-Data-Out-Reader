@@ -10,7 +10,7 @@ import (
 )
 
 type recievedcarstate struct {
-	IsRaceOn         int32
+	IsRaceOn         int8
 	TimestampMS      uint32
 	EngineMaxRPM     float32
 	EngineIdleRPM    float32
