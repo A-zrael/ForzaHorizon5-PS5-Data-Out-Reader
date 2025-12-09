@@ -1,4 +1,5 @@
-# ForzaHorizon5-PS5-Data-Out-Reader
+![](https://github.com/A-zrael/Forza-Horizon-5-Recorder/blob/main/Telemetry%20Recorder%20Icon.jpeg?raw=true)
+# ForzaHorizon5 Telemetry Recorder
 Forza Horizon 5 PS5 data recorder with an in-browser race analyzer (track map, deltas, inputs, events).
 
 ## Quick start
